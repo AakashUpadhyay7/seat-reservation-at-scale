@@ -35,7 +35,7 @@ This means two transactions racing for A1 cannot both observe A1 as available. O
 
 Multi-seat requests are **all-or-nothing**. Sorting the seat names gives every transaction the same lock order, preventing the classic A1/A2 vs A2/A1 deadlock pattern.
 
-A database-level `UNIQUE(seat_id)` constraint on `reservation_seats` is an additional invariant guard.
+The authoritative ownership state is the `seats.status` row. Historical `reservation_seats` links are retained so cancelled reservations remain auditable and a released seat can be booked again.
 
 ### Per-user limit
 
@@ -259,29 +259,26 @@ Commit incrementally rather than one giant commit. Suggested sequence:
 10. docs: add architecture and assignment write-up
 ```
 
-## Render deployment
+## Deploy a live demo
 
-Render supports Docker-based web services and managed Postgres. Create a PostgreSQL database and a Docker Web Service from this repository. Set the service health-check path to `/ready`. Render web services must listen on the `PORT` environment variable; this application already uses `${PORT:8080}`.
+The service is Dockerized and can be deployed to a Docker-compatible hosting provider such as Render. The application listens on the provider's `PORT` environment variable and exposes `/ready` for the health check.
 
 Set these environment variables on the web service:
 
 ```text
-DATABASE_URL=jdbc:postgresql://<render-postgres-host>:5432/<database>
-DB_USERNAME=<database-user>
-DB_PASSWORD=<database-password>
-AUTH_SECRET=<long-random-secret>
-ADMIN_TOKEN=<long-random-admin-token>
+DATABASE_URL=<PostgreSQL JDBC URL>
+DB_USERNAME=<database user>
+DB_PASSWORD=<database password>
+AUTH_SECRET=<long random secret>
+ADMIN_TOKEN=<long random admin token>
 ```
 
-The app initializes its schema from `schema.sql` on startup. For a real production deployment, use versioned migrations (Flyway/Liquibase) instead of startup initialization.
+After deployment, verify:
 
-After deployment:
-
-```bash
-curl https://YOUR-SERVICE.onrender.com/live
-curl https://YOUR-SERVICE.onrender.com/ready
+```text
+GET https://YOUR-SERVICE-URL/live
+GET https://YOUR-SERVICE-URL/ready
+GET https://YOUR-SERVICE-URL/actuator/prometheus
 ```
 
-Then create a show using the admin token and run the burst script against the public URL.
-
-Render's free web services can spin down after inactivity, so the first request can be a cold-start request. Free Render Postgres currently has a 30-day lifetime and other resource limitations; this is suitable for an interview demo but not a production database. For the evaluator's 20,000-request burst, use a sufficiently sized temporary service/database if the free instance becomes a bottleneck.
+Use the public HTTPS URL in the interview submission and keep the admin token/private database credentials out of GitHub.

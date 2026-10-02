@@ -2,186 +2,111 @@
 
 ## 1. Atomic decision
 
-The authoritative state is PostgreSQL.
+PostgreSQL is the source of truth for seat ownership.
 
-For a reservation request, the application starts one transaction and sorts the requested seat identifiers. It then locks all corresponding seat rows using PostgreSQL `SELECT ... FOR UPDATE` in deterministic seat order.
+A reservation runs in one transaction:
 
-The decision is therefore:
-
-1. Lock all requested seat rows.
-2. Verify that every requested row is `available`.
-3. Count the user's already-confirmed seats.
-4. Verify the per-user limit.
-5. Insert one reservation.
-6. Attach the locked seat rows.
-7. Change their state to `confirmed`.
-8. Persist the idempotency key -> reservation mapping.
+1. Validate the authenticated request and idempotency key.
+2. Serialize concurrent requests for the same `(show,user)` using a transaction-scoped PostgreSQL advisory lock.
+3. Sort requested seat identifiers and lock the corresponding seat rows with `SELECT ... FOR UPDATE` in deterministic order.
+4. Verify that every requested seat is `available`.
+5. Count the user's already-confirmed seats and enforce the per-user limit.
+6. Insert one reservation and attach the locked seats.
+7. Mark those seats `confirmed`.
+8. Attach the resulting reservation ID to the idempotency record.
 9. Commit.
 
-If two requests target A12 concurrently, they cannot both pass step 2. The first transaction locks A12 and commits it as confirmed. The second transaction waits on the row lock and subsequently reads A12 as confirmed, returning a domain HTTP 409.
+For two concurrent requests targeting A12, only one transaction can hold the A12 row lock at a time. The first confirms it; the next waits and then observes `confirmed`, producing a domain HTTP 409 rather than a 5xx.
 
-The `reservation_seats.seat_id` unique constraint provides a second database-level guard against accidental double assignment.
+The `seats.status` row is the authoritative ownership state. Historical `reservation_seats` links are retained for auditability, which also allows a cancelled seat to be booked again.
 
 ## 2. Multi-seat concurrency and deadlocks
 
-Multi-seat requests are all-or-nothing.
-
-Seat names are sorted before the `FOR UPDATE`. Therefore:
-
-```text
-Request 1: A1, A2
-Request 2: A2, A1
-```
-
-both acquire locks in:
-
-```text
-A1 -> A2
-```
-
-rather than opposite orders.
-
-This removes the common application-level deadlock cycle.
+Multi-seat requests are all-or-nothing. Seat names are sorted before locking, so requests for `[A1,A2]` and `[A2,A1]` both lock A1 then A2. This removes the classic opposite-lock-order deadlock pattern.
 
 ## 3. Per-user limit concurrency
 
-Seat row locks alone are insufficient for a per-user aggregate limit because two requests from the same user could target different seats. The transaction therefore first obtains a PostgreSQL transaction-scoped advisory lock derived from `(show_id,user_id)`. All reservations for that user/show serialize at the limit-check boundary. Different users do not block each other.
+Seat locks alone do not protect an aggregate per-user limit because two requests from one user could target different seats. The transaction-scoped advisory lock derived from `(show_id,user_id)` serializes that user's limit check while allowing different users to proceed independently.
 
 ## 4. Idempotency
 
-The idempotency table stores:
+The `idempotency_keys` table stores the show, authenticated user, idempotency key, SHA-256 request hash and resulting reservation ID. A unique constraint enforces `(show_id,user_id,idempotency_key)`.
 
-- show
-- authenticated user
-- idempotency key
-- SHA-256 request hash
-- resulting reservation ID
+- Same key + same request: the original reservation is returned.
+- Same key + different seats: HTTP 409 `IDEMPOTENCY_KEY_REUSED`.
+- A replay never creates a second reservation.
 
-A database unique constraint enforces:
+The idempotency insert and reservation are in the same transaction. If the reservation fails, the idempotency row is rolled back, so the key is not permanently consumed by a failed booking.
 
-```text
-(show_id, user_id, idempotency_key)
-```
+## 5. Identity and authorization
 
-The first request creates the idempotency row.
+The reserve/cancel APIs never trust a `user_id` supplied by the request body. Identity is derived from the bearer token.
 
-A concurrent retry attempts the same insert. PostgreSQL resolves the unique-key race. The retry then locks the existing row and checks its stored request hash.
-
-Same key + same request:
+For this take-home implementation the token format is deterministic:
 
 ```text
-return original reservation
+Bearer user:<user-id>:<AUTH_SECRET>
 ```
 
-Same key + different seats:
+Admin operations use the configured admin token. In production this would be replaced by JWT/OIDC verification using the issuer's JWKS.
+
+## 6. Release model
+
+The implementation chooses explicit cancellation rather than automatic expiry:
 
 ```text
-HTTP 409 IDEMPOTENCY_KEY_REUSED
+available -> confirmed -> available
 ```
 
-The key is scoped to the authenticated user and show, so a different user cannot consume another user's key.
-
-## 5. Payment/double-charge consideration
-
-This assignment's reservation response is the authoritative booking operation and does not call an external payment provider.
-
-For a real payment system, I would not put an unbounded external payment call inside the database transaction. I would use a reservation/payment state machine plus an outbox:
-
-```text
-RESERVATION_PENDING
-        |
-        v
-PAYMENT_REQUESTED
-        |
-   +----+----+
-   |         |
-SUCCESS    FAILURE
-   |         |
-CONFIRMED   RELEASED
-```
-
-The payment provider's idempotency key would be the reservation ID or a separately persisted payment operation ID. This makes retries safe at the payment boundary as well.
-
-## 6. Holds and expiry
-
-This implementation chooses explicit cancellation rather than automatic expiry.
-
-That keeps the correctness model small for a one-day take-home.
-
-If timed holds were required, I would add:
-
-```text
-available -> held -> confirmed
-                  |
-                  +-> available on expiry
-```
-
-with an expiry timestamp and a worker/DB query that transitions only still-held rows. The expiry update would also use row locking/conditional state checks so it could never resurrect a confirmed seat.
+Cancellation locks both the reservation row and its physical seat rows before releasing them. This prevents a concurrent reservation from observing a partially released booking. The historical reservation remains `cancelled`, while the seat becomes available for a future booking.
 
 ## 7. Consistency vs availability
 
-For a given show, seat ownership must be strongly consistent. Returning a seat as available when another buyer owns it is worse than temporarily declining a request.
+For a show, seat ownership must be strongly consistent. The service therefore treats PostgreSQL as the authoritative write store and returns dependency/domain errors rather than pretending a seat is available when the database cannot be trusted.
 
-Therefore the database transaction is the source of truth and the service prefers consistency over accepting a write when its authoritative database is unavailable.
+The API exposes reconciliation as:
 
-The readiness endpoint explicitly checks PostgreSQL.
+```text
+available + held + confirmed = total_seats
+```
+
+The show endpoint validates this invariant before returning state.
 
 ## 8. Observability
 
-The service exposes:
+The service provides:
 
-- liveness
-- readiness
-- Prometheus metrics
-- request IDs in response headers/log context
-- reservation outcome counters
-- available-seat gauges
+- `/live` for process liveness
+- `/ready` for PostgreSQL readiness
+- `/actuator/prometheus` for metrics
+- request/correlation IDs in MDC and JSON logs
+- confirmed reservation counters
+- decline counters by reason
+- available-seat gauges per show
 
-Important operational alerts would include:
+Important metrics include `reservations_confirmed_total`, `reservations_declined_total{reason=...}` and `seats_available{show_id=...}`.
 
-- readiness failures
-- sustained HTTP 5xx
-- database connection pool exhaustion
-- reservation transaction latency spikes
-- unusual `seat-taken` spikes during an on-sale event
-- reconciliation invariant failures
-- database lock/wait time growth
-- unexpected decline-rate changes
-- available-seat gauge becoming inconsistent with API state
+## 9. Burst testing
 
-The key business invariant is:
+`scripts/burst.py` provides three modes:
 
-```text
-available + held + confirmed = total
-```
+- `hot-seat`: many authenticated users compete for one seat; expected result is one confirmation and domain declines, with no 5xx.
+- `idempotency`: many retries use one idempotency key; expected result is one reservation reused by all same-body retries.
+- `per-user`: many concurrent requests use one user and different seats; the final confirmed seat count must respect the configured per-user limit.
 
-The API itself validates this invariant when returning show state.
+After every run the script fetches the show and verifies the reconciliation invariant.
 
-## 9. AI usage
+## 10. AI usage
 
-AI was used deliberately rather than blindly:
+AI was used as an engineering assistant for initial decomposition, concurrency analysis, implementation scaffolding, edge-case review, test-harness design and documentation. The important design decisions were reviewed explicitly: PostgreSQL as source of truth, row locking, deterministic lock order, transaction-scoped per-user serialization, idempotency with request hashing, token-derived identity and database-backed reconciliation.
 
-- brainstormed concurrency failure modes
-- reviewed database transaction boundaries
-- generated initial implementation scaffolding
-- helped structure the metrics and burst test
-- reviewed edge cases
-- drafted documentation
+## 11. Production next steps
 
-The engineer made and reviewed the important decisions: database as source of truth, PostgreSQL row locking, deterministic lock order, all-or-nothing multi-seat semantics, unique idempotency constraint, request hashing, and token-derived identity.
-
-## 10. Next steps
-
-For production I would add:
-
-- real OIDC/JWT verification
-- payment-provider idempotency
-- outbox/event publishing
-- explicit holds and expiry if required
-- distributed tracing
-- rate limiting
-- production dashboards
-- load testing beyond the local burst script
-- failure-injection tests for database/network failures
-- reconciliation tooling and alerts
-- a clear single-writer strategy per show/partition
+- Replace assignment authentication with OIDC/JWT verification.
+- Add payment-provider idempotency and an outbox/event model.
+- Add explicit time-boxed holds if checkout requires them.
+- Add distributed tracing and production dashboards/alerts.
+- Add rate limiting and backpressure.
+- Run k6/Gatling/JMeter tests alongside the supplied burst tool.
+- Add failure-injection tests for database/network failures.
+- Move schema changes to Flyway/Liquibase migrations.

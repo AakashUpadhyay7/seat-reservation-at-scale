@@ -1,5 +1,7 @@
 package com.example.seatreservation.security;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
@@ -14,6 +16,7 @@ import java.util.UUID;
 
 @Component
 public class AuthFilter extends OncePerRequestFilter {
+    private static final Logger log = LoggerFactory.getLogger(AuthFilter.class);
 
     @Value("${app.auth.secret}")
     private String secret;
@@ -35,9 +38,13 @@ public class AuthFilter extends OncePerRequestFilter {
         AuthUser user = authenticate(auth);
         if (user != null) request.setAttribute(USER_ATTRIBUTE, user);
 
+        long started = System.nanoTime();
         try {
             filterChain.doFilter(request, response);
         } finally {
+            long durationMicros = (System.nanoTime() - started) / 1_000;
+            log.info("request method={} path={} status={} duration_us={}",
+                    request.getMethod(), request.getRequestURI(), response.getStatus(), durationMicros);
             MDC.remove("requestId");
         }
     }
