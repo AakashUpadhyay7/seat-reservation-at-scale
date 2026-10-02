@@ -258,3 +258,30 @@ Commit incrementally rather than one giant commit. Suggested sequence:
 9. test: add hot-seat burst harness
 10. docs: add architecture and assignment write-up
 ```
+
+## Render deployment
+
+Render supports Docker-based web services and managed Postgres. Create a PostgreSQL database and a Docker Web Service from this repository. Set the service health-check path to `/ready`. Render web services must listen on the `PORT` environment variable; this application already uses `${PORT:8080}`.
+
+Set these environment variables on the web service:
+
+```text
+DATABASE_URL=jdbc:postgresql://<render-postgres-host>:5432/<database>
+DB_USERNAME=<database-user>
+DB_PASSWORD=<database-password>
+AUTH_SECRET=<long-random-secret>
+ADMIN_TOKEN=<long-random-admin-token>
+```
+
+The app initializes its schema from `schema.sql` on startup. For a real production deployment, use versioned migrations (Flyway/Liquibase) instead of startup initialization.
+
+After deployment:
+
+```bash
+curl https://YOUR-SERVICE.onrender.com/live
+curl https://YOUR-SERVICE.onrender.com/ready
+```
+
+Then create a show using the admin token and run the burst script against the public URL.
+
+Render's free web services can spin down after inactivity, so the first request can be a cold-start request. Free Render Postgres currently has a 30-day lifetime and other resource limitations; this is suitable for an interview demo but not a production database. For the evaluator's 20,000-request burst, use a sufficiently sized temporary service/database if the free instance becomes a bottleneck.
