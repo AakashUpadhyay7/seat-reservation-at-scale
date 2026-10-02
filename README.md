@@ -1,5 +1,7 @@
 # Seat Reservation at Scale
 
+> **Windows quick start:** see [`START_HERE_WINDOWS.md`](START_HERE_WINDOWS.md) for the exact Git, Docker, local-test, GitHub and Render steps.
+
 Concurrency-safe assigned-seat reservation service built for the Paytm Money take-home exercise.
 
 ## Stack
