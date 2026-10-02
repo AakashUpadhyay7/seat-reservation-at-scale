@@ -125,8 +125,8 @@ public class ReservationService {
     public void cancel(UUID reservationId, String userId) {
         Map<String,Object> row;
         try {
-            row = reservations.reservation(reservationId);
-        } catch (Exception e) {
+            row = reservations.lockReservation(reservationId);
+        } catch (org.springframework.dao.EmptyResultDataAccessException e) {
             throw new DomainException(HttpStatus.NOT_FOUND, "RESERVATION_NOT_FOUND", "Reservation not found");
         }
         String owner = String.valueOf(row.get("user_id"));
@@ -134,8 +134,11 @@ public class ReservationService {
             throw new DomainException(HttpStatus.FORBIDDEN, "NOT_OWNER", "Only the reservation owner may cancel");
         if (!"confirmed".equals(row.get("status")))
             throw new DomainException(HttpStatus.CONFLICT, "ALREADY_CANCELLED", "Reservation is already cancelled");
+
+        // Lock the physical seat rows before releasing them. A concurrent reservation
+        // can therefore never observe a partially cancelled reservation.
+        reservations.lockReservationSeats(reservationId);
         reservations.cancel(reservationId);
-        metrics.declined("cancelled");
         UUID showId = (UUID) row.get("show_id");
         metrics.setAvailable(showId, currentAvailable(showId));
     }

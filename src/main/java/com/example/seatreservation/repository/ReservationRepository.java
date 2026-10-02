@@ -86,6 +86,26 @@ public class ReservationRepository {
             """, id);
     }
 
+    public Map<String,Object> lockReservation(UUID id) {
+        return jdbc.queryForMap("""
+            SELECT id,show_id,user_id,status
+            FROM reservations
+            WHERE id=?
+            FOR UPDATE
+            """, id);
+    }
+
+    public void lockReservationSeats(UUID id) {
+        jdbc.query("""
+            SELECT se.id
+            FROM seats se
+            JOIN reservation_seats rs ON rs.seat_id=se.id
+            WHERE rs.reservation_id=?
+            ORDER BY se.id
+            FOR UPDATE
+            """, (rs,n) -> rs.getObject(1, UUID.class), id);
+    }
+
     public void cancel(UUID id) {
         jdbc.update("UPDATE reservations SET status='cancelled',cancelled_at=CURRENT_TIMESTAMP WHERE id=?", id);
         jdbc.update("""

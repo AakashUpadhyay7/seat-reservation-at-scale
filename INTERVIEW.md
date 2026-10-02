@@ -2,7 +2,7 @@
 
 ## 30-second architecture
 
-"PostgreSQL is my source of truth. A reservation is one transaction. I sort requested seats, acquire a per-user/show transaction advisory lock for the aggregate limit, then `SELECT ... FOR UPDATE` on the requested seat rows in deterministic order. I only create the reservation after every seat is confirmed available. A unique constraint on reservation_seats is a second guard. Idempotency is a unique `(show,user,key)` row storing a request hash and reservation ID."
+"PostgreSQL is my source of truth. A reservation is one transaction. I sort requested seats, acquire a per-user/show transaction advisory lock for the aggregate limit, then `SELECT ... FOR UPDATE` on the requested seat rows in deterministic order. I only create the reservation after every seat is confirmed available. The seat row state is authoritative; the historical reservation-seat link is retained so cancellation can be audited and the seat can be rebooked. Idempotency is a unique `(show,user,key)` row storing a request hash and reservation ID."
 
 ## Why not read then update?
 

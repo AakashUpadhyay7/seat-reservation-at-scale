@@ -33,8 +33,7 @@ CREATE INDEX IF NOT EXISTS idx_reservations_show_user_status
 CREATE TABLE IF NOT EXISTS reservation_seats (
     reservation_id UUID NOT NULL REFERENCES reservations(id) ON DELETE CASCADE,
     seat_id UUID NOT NULL REFERENCES seats(id),
-    PRIMARY KEY(reservation_id, seat_id),
-    UNIQUE(seat_id)
+    PRIMARY KEY(reservation_id, seat_id)
 );
 
 CREATE TABLE IF NOT EXISTS idempotency_keys (
