@@ -30,7 +30,7 @@ public class ShowRepository {
                   COUNT(*) FILTER (WHERE status='confirmed') confirmed
                 FROM shows s JOIN seats se ON se.show_id=s.id
                 WHERE s.id=?
-                GROUP BY id,name,price_paise,per_user_limit
+                GROUP BY s.id,s.name,s.price_paise,s.per_user_limit
                 """, (rs, n) -> {
                     List<ShowResponse.SeatState> states = jdbc.query(
                             "SELECT seat_number,status FROM seats WHERE show_id=? ORDER BY seat_number",
